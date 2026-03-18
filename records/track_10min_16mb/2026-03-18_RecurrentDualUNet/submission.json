@@ -1,0 +1,13 @@
+{
+  "author": "Etai Zilberman",
+  "github": "ksang123",
+  "run_name": "RecurrentDualUNet",
+  "val_bpb": null,
+  "val_loss": null,
+  "train_time_seconds": null,
+  "num_gpus": 8,
+  "gpu_type": "H100",
+  "model_params": 28056648,
+  "artifact_bytes": null,
+  "summary": "6 unique blocks x 4 recurrences = 24 effective layers, 768 dim, dual U-Net skips (local + global), per-position adaptive loop embeddings, INT4 QAT, LZMA compression"
+}
