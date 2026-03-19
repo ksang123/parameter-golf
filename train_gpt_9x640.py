@@ -1072,6 +1072,9 @@ def main() -> None:
 
     training_time_ms = 0.0
     stop_after_step: int | None = None
+    swa_started = False
+    swa_state: dict | None = None
+    swa_count = 0
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1112,6 +1115,15 @@ def main() -> None:
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
+        # SWA: accumulate weight averages during warmdown
+        if scale < 0.5 and not swa_started:
+            swa_state = {k: v.detach().clone() for k, v in base_model.state_dict().items()}
+            swa_count = 1
+            swa_started = True
+        elif swa_started and step % 50 == 0:
+            for k, v in base_model.state_dict().items():
+                swa_state[k].add_(v.detach())
+            swa_count += 1
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1164,6 +1176,13 @@ def main() -> None:
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
+
+    # Apply SWA weights if available
+    if swa_started and swa_count > 1:
+        log0(f"SWA: averaging {swa_count} checkpoints")
+        for k in swa_state:
+            swa_state[k] /= swa_count
+        base_model.load_state_dict(swa_state, strict=True)
 
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
