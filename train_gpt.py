@@ -1067,6 +1067,7 @@ def main() -> None:
     # Wallclock-aware: estimates total steps from elapsed time
     lr_warmup_steps = int(os.environ.get("LR_WARMUP_STEPS", "50"))
     lr_schedule = os.environ.get("LR_SCHEDULE", "cosine")  # "cosine" or "linear_warmdown"
+    lr_min_frac = float(os.environ.get("LR_MIN_FRAC", "0.05"))  # minimum LR as fraction of peak
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
         # Warmup: linear ramp from 0 to 1
@@ -1086,7 +1087,7 @@ def main() -> None:
                 return 1.0
             decay_progress = (progress - warmup_frac) / (1.0 - warmup_frac)
             import math
-            return 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+            return lr_min_frac + (1.0 - lr_min_frac) * 0.5 * (1.0 + math.cos(math.pi * decay_progress))
         else:
             # Original linear warmdown
             warmdown_mul = 1.0
