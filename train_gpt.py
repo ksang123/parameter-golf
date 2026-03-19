@@ -1063,26 +1063,45 @@ def main() -> None:
 
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
 
-    # Hyperparameter for LR warmup (linear ramp from 0 to base_lr)
-    lr_warmup_steps = int(os.environ.get("LR_WARMUP_STEPS", str(args.warmup_lr_steps if hasattr(args, 'warmup_lr_steps') else 50)))
+    # LR schedule: linear warmup -> cosine decay to 0
+    # Wallclock-aware: estimates total steps from elapsed time
+    lr_warmup_steps = int(os.environ.get("LR_WARMUP_STEPS", "50"))
+    lr_schedule = os.environ.get("LR_SCHEDULE", "cosine")  # "cosine" or "linear_warmdown"
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
         # Warmup: linear ramp from 0 to 1
-        warmup_mul = min(step / max(lr_warmup_steps, 1), 1.0) if lr_warmup_steps > 0 else 1.0
-        # Warmdown
-        warmdown_mul = 1.0
-        if args.warmdown_iters > 0:
-            if max_wallclock_ms is None:
-                warmdown_start = max(args.iterations - args.warmdown_iters, 0)
-                if warmdown_start <= step < args.iterations:
-                    warmdown_mul = max((args.iterations - step) / max(args.warmdown_iters, 1), 0.0)
+        if step < lr_warmup_steps:
+            return step / max(lr_warmup_steps, 1)
+
+        if lr_schedule == "cosine":
+            # Cosine decay from 1 to 0 over remaining training
+            if max_wallclock_ms is not None and max_wallclock_ms > 0:
+                # Wallclock-aware: use elapsed time to estimate progress
+                progress = min(elapsed_ms / max_wallclock_ms, 1.0)
             else:
-                step_ms = elapsed_ms / max(step, 1)
-                warmdown_ms = args.warmdown_iters * step_ms
-                remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
-                if remaining_ms <= warmdown_ms:
-                    warmdown_mul = remaining_ms / max(warmdown_ms, 1e-9)
-        return warmup_mul * warmdown_mul
+                progress = min(step / max(args.iterations, 1), 1.0)
+            # Map warmup_end..1.0 progress to 0..1 for cosine
+            warmup_frac = lr_warmup_steps * (elapsed_ms / max(step, 1)) / max_wallclock_ms if max_wallclock_ms else lr_warmup_steps / max(args.iterations, 1)
+            if progress <= warmup_frac:
+                return 1.0
+            decay_progress = (progress - warmup_frac) / (1.0 - warmup_frac)
+            import math
+            return 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+        else:
+            # Original linear warmdown
+            warmdown_mul = 1.0
+            if args.warmdown_iters > 0:
+                if max_wallclock_ms is None:
+                    warmdown_start = max(args.iterations - args.warmdown_iters, 0)
+                    if warmdown_start <= step < args.iterations:
+                        warmdown_mul = max((args.iterations - step) / max(args.warmdown_iters, 1), 0.0)
+                else:
+                    step_ms = elapsed_ms / max(step, 1)
+                    warmdown_ms = args.warmdown_iters * step_ms
+                    remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
+                    if remaining_ms <= warmdown_ms:
+                        warmdown_mul = remaining_ms / max(warmdown_ms, 1e-9)
+            return warmdown_mul
 
     # Warmup primes the compiled forward/backward/optimizer paths, then we restore the
     # initial weights/optimizer state so measured training starts from the true init.
