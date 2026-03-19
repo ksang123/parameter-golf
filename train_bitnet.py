@@ -625,7 +625,8 @@ class BitLinear(nn.Linear):
         self._cached_q = q.detach().to(torch.int8)
         self._cached_scale = scale.detach().squeeze(-1).half()
         self._cached_shape = shape
-        return (q * scale).reshape(shape) + (w - w).detach()  # STE: gradient flows through w
+        result = q * scale
+        return (result.reshape(shape) - w).detach() + w  # STE
 
     def forward(self, x: Tensor) -> Tensor:
         # RMSNorm on input activations (BitNet b1.58 style)
