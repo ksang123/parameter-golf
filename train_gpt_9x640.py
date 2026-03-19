@@ -18,6 +18,11 @@ import time
 import uuid
 import zlib
 import lzma
+try:
+    import zstandard as zstd
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
 from pathlib import Path
 
 import numpy as np
@@ -1202,16 +1207,19 @@ def main() -> None:
     tern_raw = tern_buf.getvalue()
     tern_lzma = lzma.compress(tern_raw, preset=9)
     tern_zlib = zlib.compress(tern_raw, 9)
-    tern_blob = tern_lzma if len(tern_lzma) <= len(tern_zlib) else tern_zlib
-    compress_method = "lzma" if len(tern_lzma) <= len(tern_zlib) else "zlib"
+    candidates = [("lzma", tern_lzma), ("zlib", tern_zlib)]
+    if HAS_ZSTD:
+        cctx = zstd.ZstdCompressor(level=22)
+        candidates.append(("zstd", cctx.compress(tern_raw)))
+    compress_method, tern_blob = min(candidates, key=lambda x: len(x[1]))
     if master_process:
         with open("final_model.ternary.ptz", "wb") as f:
             f.write(tern_blob)
         tern_file_bytes = os.path.getsize("final_model.ternary.ptz")
         code_bytes = len(code.encode("utf-8"))
         log0(f"Ternary artifact: {tern_file_bytes} bytes ({compress_method}) = {tern_file_bytes/1e6:.2f}MB")
-        log0(f"  lzma: {len(tern_lzma)} bytes = {len(tern_lzma)/1e6:.2f}MB")
-        log0(f"  zlib: {len(tern_zlib)} bytes = {len(tern_zlib)/1e6:.2f}MB")
+        for method, blob in candidates:
+            log0(f"  {method}: {len(blob)} bytes = {len(blob)/1e6:.2f}MB")
         log0(f"  code: {code_bytes} bytes")
         log0(f"Total submission size: {tern_file_bytes + code_bytes} bytes = {(tern_file_bytes + code_bytes)/1e6:.2f}MB")
 
