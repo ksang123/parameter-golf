@@ -21,4 +21,4 @@ MUON_MOMENTUM=0.99 \
 MUON_MOMENTUM_WARMUP_START=0.92 \
 MUON_MOMENTUM_WARMUP_STEPS=1500 \
 ROPE_BASE=200000 \
-torchrun --standalone --nproc_per_node=8 train_gpt_9x640.py
+torchrun --standalone --nproc_per_node=8 train_bitnet.py
