@@ -1,0 +1,16 @@
+{
+    "author": "TBD",
+    "github_id": "TBD",
+    "name": "BitNet b1.58: 12x768 MLP3x Ternary + Chinchilla Scaling",
+    "blurb": "64.5M ternary-weight transformer (12 layers, 768 dim, MLP 3x) packed at 1.6 bits/param via base-3 encoding. Trains with STE ternary quantization and fp16 scales for zero roundtrip gap. Chinchilla-optimal: 3.8x more params than baseline in same artifact size.",
+    "date": "2026-03-19",
+    "val_loss": -1,
+    "val_bpb": -1,
+    "pre_quant_val_bpb": -1,
+    "step_stop": -1,
+    "wallclock_seconds": -1,
+    "eval_time_seconds": -1,
+    "bytes_total": -1,
+    "bytes_model": -1,
+    "bytes_code": -1
+}
