@@ -460,14 +460,31 @@ def unpack_ternary(data: bytes, n: int) -> Tensor:
     return torch.from_numpy(flat.astype(np.int8) - 1)  # map {0,1,2} -> {-1,0,1}
 
 
-def quantize_state_dict_ternary(state_dict: dict[str, Tensor], group_size: int = BITNET_GROUP_SIZE):
-    """Ternary for large matrices (packed base-3), fp16 for embedding + scalars."""
+def quantize_state_dict_ternary(state_dict: dict[str, Tensor], model: nn.Module = None, group_size: int = BITNET_GROUP_SIZE):
+    """Ternary for large matrices (packed base-3), fp16 for embedding + scalars.
+    If model is provided, uses cached quantization from the last forward pass."""
+    # Build cache from model's BitLinear layers
+    cache = {}
+    if model is not None:
+        for name, mod in model.named_modules():
+            if isinstance(mod, BitLinear) and hasattr(mod, '_cached_q'):
+                cache[name + '.weight'] = (mod._cached_q, mod._cached_scale, mod._cached_shape)
+
     quantized: dict[str, object] = {}
     stats = {"ternary_bytes": 0, "fp16_bytes": 0}
     for name, tensor in state_dict.items():
         t = tensor.detach().cpu().float().contiguous()
-        if t.ndim == 2 and t.numel() > 65_536 and "tok_emb" not in name:
-            # Ternary quantize with per-group scale
+        if name in cache:
+            q, scale, shape = cache[name]
+            q = q.cpu()
+            scale = scale.cpu()
+            packed_bytes, pack_meta = pack_ternary(q)
+            quantized[name] = {"type": "ternary", "packed": packed_bytes,
+                               "scale": scale, "shape": list(shape),
+                               "padded_cols": shape[1], "group_size": group_size,
+                               "n_trits": pack_meta[0]}
+            stats["ternary_bytes"] += len(packed_bytes) + scale.numel() * 2
+        elif t.ndim == 2 and t.numel() > 65_536 and "tok_emb" not in name:
             pad = (group_size - t.shape[1] % group_size) % group_size
             t_padded = F.pad(t, (0, pad)) if pad > 0 else t
             t_grouped = t_padded.reshape(-1, group_size)
@@ -603,8 +620,12 @@ class BitLinear(nn.Linear):
         g = self.group_size
         w_flat = w.reshape(-1, g)
         scale = w_flat.abs().mean(-1, keepdim=True).clamp(min=1e-8).half().float()
-        q = (w_flat / scale).round().clamp(-1, 1) * scale
-        return (q.reshape(shape) - w).detach() + w  # STE
+        q = (w_flat / scale).round().clamp(-1, 1)
+        # Cache for serialization
+        self._cached_q = q.detach().to(torch.int8)
+        self._cached_scale = scale.detach().squeeze(-1).half()
+        self._cached_shape = shape
+        return (q * scale).reshape(shape) + (w - w).detach()  # STE: gradient flows through w
 
     def forward(self, x: Tensor) -> Tensor:
         # RMSNorm on input activations (BitNet b1.58 style)
@@ -1175,7 +1196,14 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
 
     # Ternary roundtrip
-    tern_obj, tern_stats = quantize_state_dict_ternary(base_model.state_dict())
+    # Run one forward pass to populate caches
+    base_model.eval()
+    with torch.no_grad():
+        x_dummy, y_dummy = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            base_model(x_dummy, y_dummy)
+
+    tern_obj, tern_stats = quantize_state_dict_ternary(base_model.state_dict(), model=base_model)
     tern_buf = io.BytesIO()
     torch.save(tern_obj, tern_buf)
     tern_raw = tern_buf.getvalue()
