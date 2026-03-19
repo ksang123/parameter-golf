@@ -3,9 +3,9 @@
 # ~69M params, ~15.4MB ternary artifact
 # H100 ~193ms/step -> ~3100 steps -> 1.6B tokens in 10min
 # A100 ~2x slower -> ~386ms/step -> need ~20min
-RUN_ID=bitnet_10x1024 \
+RUN_ID=bitnet_14x1024 \
 ITERATIONS=20000 \
-NUM_LAYERS=10 \
+NUM_LAYERS=14 \
 MODEL_DIM=1024 \
 NUM_HEADS=16 \
 NUM_KV_HEADS=4 \
