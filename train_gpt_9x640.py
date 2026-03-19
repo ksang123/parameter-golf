@@ -431,26 +431,54 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
 # Ternary quantization for BitNet artifact
 BITNET_GROUP_SIZE = 64
 
+def pack_ternary(q: Tensor) -> tuple[bytes, list]:
+    """Pack ternary {-1,0,1} as base-3: 5 trits per byte (1.6 bits/trit). Lossless."""
+    flat = (q.reshape(-1).to(torch.int8) + 1).numpy()  # map {-1,0,1} -> {0,1,2}
+    n = len(flat)
+    pad = (5 - n % 5) % 5
+    if pad:
+        flat = np.concatenate([flat, np.zeros(pad, dtype=np.int8)])
+    groups = flat.reshape(-1, 5)
+    # Encode 5 trits as: t0 + 3*t1 + 9*t2 + 27*t3 + 81*t4
+    packed = (groups[:, 0].astype(np.uint8) +
+              groups[:, 1].astype(np.uint8) * 3 +
+              groups[:, 2].astype(np.uint8) * 9 +
+              groups[:, 3].astype(np.uint8) * 27 +
+              groups[:, 4].astype(np.uint8) * 81)
+    return packed.tobytes(), [n]
+
+
+def unpack_ternary(data: bytes, n: int) -> Tensor:
+    """Unpack base-3 encoded ternary back to {-1,0,1}."""
+    packed = np.frombuffer(data, dtype=np.uint8)
+    trits = np.zeros((len(packed), 5), dtype=np.int8)
+    vals = packed.astype(np.int16)
+    for i in range(5):
+        trits[:, i] = vals % 3
+        vals //= 3
+    flat = trits.reshape(-1)[:n]
+    return torch.from_numpy(flat.astype(np.int8) - 1)  # map {0,1,2} -> {-1,0,1}
+
+
 def quantize_state_dict_ternary(state_dict: dict[str, Tensor], group_size: int = BITNET_GROUP_SIZE):
-    """Ternary for large matrices, INT8 for embedding, fp16 for scalars."""
+    """Ternary for large matrices (packed base-3), fp16 for embedding + scalars."""
     quantized: dict[str, object] = {}
-    stats = {"ternary_bytes": 0, "int8_bytes": 0, "fp16_bytes": 0}
+    stats = {"ternary_bytes": 0, "fp16_bytes": 0}
     for name, tensor in state_dict.items():
         t = tensor.detach().cpu().float().contiguous()
         if t.ndim == 2 and t.numel() > 65_536 and "tok_emb" not in name:
-            # Ternary: round to {-1, 0, 1} with per-group mean-abs scale
+            # Ternary quantize with per-group scale
             pad = (group_size - t.shape[1] % group_size) % group_size
             t_padded = F.pad(t, (0, pad)) if pad > 0 else t
             t_grouped = t_padded.reshape(-1, group_size)
             scale = t_grouped.abs().mean(-1, keepdim=True).clamp(min=1e-8)
             q = (t_grouped / scale).round().clamp(-1, 1).to(torch.int8)
-            # Pack ternary: store as int8 {-1,0,1} — 1 byte each, LZMA compresses well
-            quantized[name] = {"type": "ternary", "q": q, "scale": scale.to(torch.float16).squeeze(-1),
-                               "shape": list(t.shape), "padded_cols": t_padded.shape[1]}
-            stats["ternary_bytes"] += q.numel() + scale.numel() * 2
-        elif t.ndim == 2 and "tok_emb" in name:
-            quantized[name] = {"type": "fp16", "data": t.to(torch.float16)}
-            stats["fp16_bytes"] += t.numel() * 2
+            packed_bytes, pack_meta = pack_ternary(q)
+            quantized[name] = {"type": "ternary", "packed": packed_bytes,
+                               "scale": scale.to(torch.float16).squeeze(-1),
+                               "shape": list(t.shape), "padded_cols": t_padded.shape[1],
+                               "group_size": group_size, "n_trits": pack_meta[0]}
+            stats["ternary_bytes"] += len(packed_bytes) + scale.numel() * 2
         else:
             quantized[name] = {"type": "fp16", "data": t.to(torch.float16)}
             stats["fp16_bytes"] += t.numel() * 2
@@ -461,7 +489,8 @@ def dequantize_state_dict_ternary(quantized: dict[str, object], target_dtype=tor
     out: dict[str, Tensor] = {}
     for name, entry in quantized.items():
         if entry["type"] == "ternary":
-            q = entry["q"].float()
+            q = unpack_ternary(entry["packed"], entry["n_trits"])
+            q = q.float().reshape(-1, entry["group_size"])
             scale = entry["scale"].float().unsqueeze(-1)
             t = (q * scale).reshape(-1, entry["padded_cols"])
             shape = entry["shape"]
@@ -999,13 +1028,21 @@ def main() -> None:
     def lr_mul(step: int, elapsed_ms: float) -> float:
         if step < lr_warmup_steps:
             return step / max(lr_warmup_steps, 1)
-        if lr_schedule == "cosine" and max_wallclock_ms is not None and max_wallclock_ms > 0:
+        if max_wallclock_ms is not None and max_wallclock_ms > 0:
             progress = min(elapsed_ms / max_wallclock_ms, 1.0)
             warmup_frac = lr_warmup_steps * (elapsed_ms / max(step, 1)) / max_wallclock_ms
+            warmdown_frac = 0.15  # last 15% is linear warmdown to 0
+            cosine_end = 1.0 - warmdown_frac
             if progress <= warmup_frac:
                 return 1.0
-            decay_progress = (progress - warmup_frac) / (1.0 - warmup_frac)
-            return lr_min_frac + (1.0 - lr_min_frac) * 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+            elif progress <= cosine_end:
+                # Cosine decay from 1.0 to lr_min_frac
+                decay_progress = (progress - warmup_frac) / (cosine_end - warmup_frac)
+                return lr_min_frac + (1.0 - lr_min_frac) * 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+            else:
+                # Linear warmdown from lr_min_frac to 0
+                warmdown_progress = (progress - cosine_end) / warmdown_frac
+                return lr_min_frac * (1.0 - warmdown_progress)
         # Fallback: original linear warmdown
         if args.warmdown_iters <= 0:
             return 1.0
@@ -1145,60 +1182,10 @@ def main() -> None:
     # SERIALIZATION + ROUNDTRIP VALIDATION
     # -----------------------------
     # Save the raw state (useful for debugging/loading in PyTorch directly), then always produce
-    # the compressed int8+zlib artifact and validate the round-tripped weights.
-
+    # Save raw model and code size
     if master_process:
-        torch.save(base_model.state_dict(), "final_model.pt")
-        model_bytes = os.path.getsize("final_model.pt")
         code_bytes = len(code.encode("utf-8"))
-        log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
-        log0(f"Total submission size: {model_bytes + code_bytes} bytes")
-
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
-    quant_buf = io.BytesIO()
-    torch.save(quant_obj, quant_buf)
-    quant_raw = quant_buf.getvalue()
-    quant_blob = zlib.compress(quant_raw, level=9)
-    quant_raw_bytes = len(quant_raw)
-    if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
-            f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
-        code_bytes = len(code.encode("utf-8"))
-        ratio = quant_stats["baseline_tensor_bytes"] / max(quant_stats["int8_payload_bytes"], 1)
-        log0(
-            f"Serialized model int8+zlib: {quant_file_bytes} bytes "
-            f"(payload:{quant_stats['int8_payload_bytes']} raw_torch:{quant_raw_bytes} payload_ratio:{ratio:.2f}x)"
-        )
-        log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
-
-    if distributed:
-        dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
-        quant_blob_disk = f.read()
-    quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
-    base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
-    torch.cuda.synchronize()
-    t_qeval = time.perf_counter()
-    q_val_loss, q_val_bpb = eval_val(
-        args,
-        model,
-        rank,
-        world_size,
-        device,
-        grad_accum_steps,
-        val_tokens,
-        base_bytes_lut,
-        has_leading_space_lut,
-        is_boundary_token_lut,
-    )
-    torch.cuda.synchronize()
-    log0(
-        f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} "
-        f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
-    )
-    log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
     # Ternary roundtrip
     tern_obj, tern_stats = quantize_state_dict_ternary(base_model.state_dict())
