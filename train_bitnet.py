@@ -471,7 +471,7 @@ def quantize_state_dict_ternary(state_dict: dict[str, Tensor], group_size: int =
             pad = (group_size - t.shape[1] % group_size) % group_size
             t_padded = F.pad(t, (0, pad)) if pad > 0 else t
             t_grouped = t_padded.reshape(-1, group_size)
-            scale = t_grouped.abs().mean(-1, keepdim=True).clamp(min=1e-8)
+            scale = t_grouped.abs().mean(-1, keepdim=True).clamp(min=1e-8).half().float()
             q = (t_grouped / scale).round().clamp(-1, 1).to(torch.int8)
             packed_bytes, pack_meta = pack_ternary(q)
             quantized[name] = {"type": "ternary", "packed": packed_bytes,
