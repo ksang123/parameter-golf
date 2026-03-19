@@ -424,10 +424,10 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
 
 
 # INT4 per-group quantization for final artifact
-INT4_GROUP_SIZE = 32
+INT4_GROUP_SIZE = 8
 
 def quantize_state_dict_int4_mixed(state_dict: dict[str, Tensor], group_size: int = INT4_GROUP_SIZE):
-    """Mixed INT4/INT8: large 2D matrices -> INT4, embedding -> INT8, rest -> fp16."""
+    """Mixed INT4/INT8: large 2D matrices -> INT4 with optimal clipping, embedding -> INT8, rest -> fp16."""
     quantized: dict[str, object] = {}
     stats = {"int4_bytes": 0, "int8_bytes": 0, "fp16_bytes": 0}
     for name, tensor in state_dict.items():
@@ -436,11 +436,26 @@ def quantize_state_dict_int4_mixed(state_dict: dict[str, Tensor], group_size: in
             pad = (group_size - t.shape[1] % group_size) % group_size
             t_padded = F.pad(t, (0, pad)) if pad > 0 else t
             t_grouped = t_padded.reshape(-1, group_size)
-            scale = t_grouped.abs().amax(-1, keepdim=True).clamp(min=1e-8) / 7.0
-            q = (t_grouped / scale).round().clamp(-8, 7).to(torch.int8)
-            quantized[name] = {"type": "int4", "q": q, "scale": scale.to(torch.float16).squeeze(-1),
+            amax = t_grouped.abs().amax(-1, keepdim=True).clamp(min=1e-8)
+            best_q = None
+            best_err = torch.full((t_grouped.shape[0],), float('inf'))
+            best_scale = None
+            for clip_ratio in [0.9, 0.95, 0.98, 1.0]:
+                clip_val = amax * clip_ratio
+                s = clip_val / 7.0
+                q = (t_grouped.clamp(-clip_val, clip_val) / s).round().clamp(-8, 7)
+                err = (q * s - t_grouped).pow(2).sum(-1)
+                improved = err < best_err
+                if best_q is None:
+                    best_q = q.to(torch.int8)
+                    best_scale = s
+                else:
+                    best_q[improved] = q[improved].to(torch.int8)
+                    best_scale[improved] = s[improved]
+                best_err = torch.min(best_err, err)
+            quantized[name] = {"type": "int4", "q": best_q, "scale": best_scale.to(torch.float16).squeeze(-1),
                                "shape": list(t.shape), "padded_cols": t_padded.shape[1]}
-            stats["int4_bytes"] += q.numel() // 2 + scale.numel() * 2
+            stats["int4_bytes"] += best_q.numel() // 2 + best_scale.numel() * 2
         elif t.ndim == 2 and "tok_emb" in name:
             scale = t.abs().amax(-1, keepdim=True).clamp(min=1e-8) / 127.0
             q = (t / scale).round().clamp(-127, 127).to(torch.int8)
