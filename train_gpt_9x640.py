@@ -1022,34 +1022,21 @@ def main() -> None:
 
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
     lr_warmup_steps = int(os.environ.get("LR_WARMUP_STEPS", "50"))
-    lr_schedule = os.environ.get("LR_SCHEDULE", "cosine")
-    lr_min_frac = float(os.environ.get("LR_MIN_FRAC", "0.05"))
 
     def lr_mul(step: int, elapsed_ms: float) -> float:
+        # Linear warmup
         if step < lr_warmup_steps:
             return step / max(lr_warmup_steps, 1)
-        if max_wallclock_ms is not None and max_wallclock_ms > 0:
-            progress = min(elapsed_ms / max_wallclock_ms, 1.0)
-            warmup_frac = lr_warmup_steps * (elapsed_ms / max(step, 1)) / max_wallclock_ms
-            warmdown_frac = 0.15  # last 15% is linear warmdown to 0
-            cosine_end = 1.0 - warmdown_frac
-            if progress <= warmup_frac:
-                return 1.0
-            elif progress <= cosine_end:
-                # Cosine decay from 1.0 to lr_min_frac
-                decay_progress = (progress - warmup_frac) / (cosine_end - warmup_frac)
-                return lr_min_frac + (1.0 - lr_min_frac) * 0.5 * (1.0 + math.cos(math.pi * decay_progress))
-            else:
-                # Linear warmdown from lr_min_frac to 0
-                warmdown_progress = (progress - cosine_end) / warmdown_frac
-                return lr_min_frac * (1.0 - warmdown_progress)
-        # Fallback: original linear warmdown
+        # Wallclock-aware linear warmdown (same as baseline)
         if args.warmdown_iters <= 0:
             return 1.0
-        step_ms = elapsed_ms / max(step, 1)
-        warmdown_ms = args.warmdown_iters * step_ms
-        remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0) if max_wallclock_ms else 0.0
-        return remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
+        if max_wallclock_ms is not None and max_wallclock_ms > 0:
+            step_ms = elapsed_ms / max(step, 1)
+            warmdown_ms = args.warmdown_iters * step_ms
+            remaining_ms = max(max_wallclock_ms - elapsed_ms, 0.0)
+            return remaining_ms / max(warmdown_ms, 1e-9) if remaining_ms <= warmdown_ms else 1.0
+        warmdown_start = max(args.iterations - args.warmdown_iters, 0)
+        return max((args.iterations - step) / max(args.warmdown_iters, 1), 0.0) if warmdown_start <= step < args.iterations else 1.0
 
     # Warmup primes the compiled forward/backward/optimizer paths, then we restore the
     # initial weights/optimizer state so measured training starts from the true init.
