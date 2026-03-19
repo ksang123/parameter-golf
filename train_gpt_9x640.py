@@ -602,7 +602,7 @@ class BitLinear(nn.Linear):
         shape = w.shape
         g = self.group_size
         w_flat = w.reshape(-1, g)
-        scale = w_flat.abs().mean(-1, keepdim=True).clamp(min=1e-8)
+        scale = w_flat.abs().mean(-1, keepdim=True).clamp(min=1e-8).half().float()
         q = (w_flat / scale).round().clamp(-1, 1) * scale
         return (q.reshape(shape) - w).detach() + w  # STE
 
