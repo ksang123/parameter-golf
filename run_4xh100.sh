@@ -18,4 +18,5 @@ LR_MIN_FRAC=0.05 \
 MATRIX_LR=0.02 \
 SCALAR_LR=0.02 \
 TIED_EMBED_LR=0.03 \
+MUON_MOMENTUM=0.99 \
 torchrun --standalone --nproc_per_node=4 train_gpt_9x640.py
