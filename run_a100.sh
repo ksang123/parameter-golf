@@ -1,23 +1,25 @@
 #!/bin/bash
-# 12x512 on 8xA100 — matches H100 token budget (~5.4B tokens, ~10345 steps)
-# Runs ~17min on A100 to simulate 10min on H100
-RUN_ID=12x512_a100 \
+# 9x640 on 8xA100 — matches H100 token budget (~4.6B tokens)
+# 26.5M params, INT4 artifact ~14.5MB
+# H100 step time ~68ms -> ~6800 steps in 10min -> 3.6B tokens
+# A100 ~1.6x slower -> ~109ms/step -> need ~11min to match
+RUN_ID=9x640_a100 \
 DATA_PATH=./data/datasets/fineweb10B_sp1024/ \
 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
 VOCAB_SIZE=1024 \
-NUM_LAYERS=12 \
-MODEL_DIM=512 \
-NUM_HEADS=8 \
-NUM_KV_HEADS=4 \
-MLP_HIDDEN=1024 \
+NUM_LAYERS=9 \
+MODEL_DIM=640 \
+NUM_HEADS=10 \
+NUM_KV_HEADS=5 \
+MLP_HIDDEN=1280 \
 RECURRENCES=1 \
 QAT_ENABLED=0 \
 ITERATIONS=20000 \
 TRAIN_BATCH_TOKENS=524288 \
 TRAIN_SEQ_LEN=1024 \
-VAL_LOSS_EVERY=2000 \
+VAL_LOSS_EVERY=1500 \
 VAL_BATCH_SIZE=524288 \
-MAX_WALLCLOCK_SECONDS=1020 \
+MAX_WALLCLOCK_SECONDS=720 \
 TRAIN_LOG_EVERY=50 \
 LR_WARMUP_STEPS=50 \
 LR_SCHEDULE=cosine \
