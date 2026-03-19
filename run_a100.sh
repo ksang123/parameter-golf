@@ -1,16 +1,17 @@
 #!/bin/bash
-# 2x1024 ultra-wide shallow model, INT8 quantization
-# 15.7M params, ~14.5MB INT8+zlib, ~39ms/step on H100 -> 8.1B tokens
-# A100 ~1.6-2x slower -> ~62-78ms/step -> need ~18min
-RUN_ID=2x1024_a100 \
+# 10x1024 BitNet b1.58: ternary weights, fp16 tied embeddings
+# ~69M params, ~15.4MB ternary artifact
+# H100 ~193ms/step -> ~3100 steps -> 1.6B tokens in 10min
+# A100 ~2x slower -> ~386ms/step -> need ~20min
+RUN_ID=bitnet_10x1024 \
 ITERATIONS=20000 \
-NUM_LAYERS=2 \
+NUM_LAYERS=10 \
 MODEL_DIM=1024 \
 NUM_HEADS=16 \
-NUM_KV_HEADS=8 \
+NUM_KV_HEADS=4 \
 TRAIN_BATCH_TOKENS=524288 \
 TRAIN_SEQ_LEN=1024 \
-VAL_LOSS_EVERY=2000 \
+VAL_LOSS_EVERY=1000 \
 VAL_BATCH_SIZE=524288 \
 MAX_WALLCLOCK_SECONDS=1200 \
 TRAIN_LOG_EVERY=50 \

@@ -423,61 +423,44 @@ def dequantize_state_dict_int8(obj: dict[str, object]) -> dict[str, Tensor]:
     return out
 
 
-# INT4 per-group quantization for final artifact
-INT4_GROUP_SIZE = 8
+# Ternary quantization for BitNet artifact
+BITNET_GROUP_SIZE = 64
 
-def quantize_state_dict_int4_mixed(state_dict: dict[str, Tensor], group_size: int = INT4_GROUP_SIZE):
-    """Mixed INT4/INT8: large 2D matrices -> INT4 with optimal clipping, embedding -> INT8, rest -> fp16."""
+def quantize_state_dict_ternary(state_dict: dict[str, Tensor], group_size: int = BITNET_GROUP_SIZE):
+    """Ternary for large matrices, INT8 for embedding, fp16 for scalars."""
     quantized: dict[str, object] = {}
-    stats = {"int4_bytes": 0, "int8_bytes": 0, "fp16_bytes": 0}
+    stats = {"ternary_bytes": 0, "int8_bytes": 0, "fp16_bytes": 0}
     for name, tensor in state_dict.items():
         t = tensor.detach().cpu().float().contiguous()
         if t.ndim == 2 and t.numel() > 65_536 and "tok_emb" not in name:
+            # Ternary: round to {-1, 0, 1} with per-group mean-abs scale
             pad = (group_size - t.shape[1] % group_size) % group_size
             t_padded = F.pad(t, (0, pad)) if pad > 0 else t
             t_grouped = t_padded.reshape(-1, group_size)
-            amax = t_grouped.abs().amax(-1, keepdim=True).clamp(min=1e-8)
-            best_q = None
-            best_err = torch.full((t_grouped.shape[0],), float('inf'))
-            best_scale = None
-            for clip_ratio in [0.9, 0.95, 0.98, 1.0]:
-                clip_val = amax * clip_ratio
-                s = clip_val / 7.0
-                q = (t_grouped.clamp(-clip_val, clip_val) / s).round().clamp(-8, 7)
-                err = (q * s - t_grouped).pow(2).sum(-1)
-                improved = err < best_err
-                if best_q is None:
-                    best_q = q.to(torch.int8)
-                    best_scale = s
-                else:
-                    best_q[improved] = q[improved].to(torch.int8)
-                    best_scale[improved] = s[improved]
-                best_err = torch.min(best_err, err)
-            quantized[name] = {"type": "int4", "q": best_q, "scale": best_scale.to(torch.float16).squeeze(-1),
+            scale = t_grouped.abs().mean(-1, keepdim=True).clamp(min=1e-8)
+            q = (t_grouped / scale).round().clamp(-1, 1).to(torch.int8)
+            # Pack ternary: store as int8 {-1,0,1} — 1 byte each, LZMA compresses well
+            quantized[name] = {"type": "ternary", "q": q, "scale": scale.to(torch.float16).squeeze(-1),
                                "shape": list(t.shape), "padded_cols": t_padded.shape[1]}
-            stats["int4_bytes"] += best_q.numel() // 2 + best_scale.numel() * 2
+            stats["ternary_bytes"] += q.numel() + scale.numel() * 2
         elif t.ndim == 2 and "tok_emb" in name:
-            scale = t.abs().amax(-1, keepdim=True).clamp(min=1e-8) / 127.0
-            q = (t / scale).round().clamp(-127, 127).to(torch.int8)
-            quantized[name] = {"type": "int8", "q": q, "scale": scale.to(torch.float16).squeeze(-1)}
-            stats["int8_bytes"] += q.numel() + scale.numel() * 2
+            quantized[name] = {"type": "fp16", "data": t.to(torch.float16)}
+            stats["fp16_bytes"] += t.numel() * 2
         else:
             quantized[name] = {"type": "fp16", "data": t.to(torch.float16)}
             stats["fp16_bytes"] += t.numel() * 2
     return quantized, stats
 
 
-def dequantize_state_dict_int4_mixed(quantized: dict[str, object], target_dtype=torch.bfloat16) -> dict[str, Tensor]:
+def dequantize_state_dict_ternary(quantized: dict[str, object], target_dtype=torch.bfloat16) -> dict[str, Tensor]:
     out: dict[str, Tensor] = {}
     for name, entry in quantized.items():
-        if entry["type"] == "int4":
+        if entry["type"] == "ternary":
             q = entry["q"].float()
             scale = entry["scale"].float().unsqueeze(-1)
             t = (q * scale).reshape(-1, entry["padded_cols"])
             shape = entry["shape"]
             out[name] = t[:shape[0], :shape[1]].to(target_dtype).contiguous()
-        elif entry["type"] == "int8":
-            out[name] = (entry["q"].float() * entry["scale"].float().unsqueeze(-1)).to(target_dtype).contiguous()
         else:
             out[name] = entry["data"].to(target_dtype).contiguous()
     return out
@@ -574,6 +557,29 @@ class CastedLinear(nn.Linear):
         return F.linear(x, self.weight.to(x.dtype), bias)
 
 
+class BitLinear(nn.Linear):
+    """BitNet b1.58: ternary weights {-1, 0, 1} with STE, per-group absmax scaling."""
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, group_size: int = 64):
+        super().__init__(in_features, out_features, bias=bias)
+        self.group_size = group_size
+
+    def _quantize_weights(self, w: Tensor) -> Tensor:
+        # Per-group absmax ternary quantization with STE
+        shape = w.shape
+        g = self.group_size
+        w_flat = w.reshape(-1, g)
+        scale = w_flat.abs().mean(-1, keepdim=True).clamp(min=1e-8)
+        q = (w_flat / scale).round().clamp(-1, 1) * scale
+        return (q.reshape(shape) - w).detach() + w  # STE
+
+    def forward(self, x: Tensor) -> Tensor:
+        # RMSNorm on input activations (BitNet b1.58 style)
+        x = F.rms_norm(x, (x.size(-1),))
+        w = self._quantize_weights(self.weight)
+        bias = self.bias.to(x.dtype) if self.bias is not None else None
+        return F.linear(x, w.to(x.dtype), bias)
+
+
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
     # Keep small/control parameters in fp32 even when the model body runs in bf16.
     with torch.no_grad():
@@ -633,10 +639,10 @@ class CausalSelfAttention(nn.Module):
         if self.head_dim % 2 != 0:
             raise ValueError("head_dim must be even for RoPE")
         kv_dim = self.num_kv_heads * self.head_dim
-        self.c_q = CastedLinear(dim, dim, bias=False)
-        self.c_k = CastedLinear(dim, kv_dim, bias=False)
-        self.c_v = CastedLinear(dim, kv_dim, bias=False)
-        self.proj = CastedLinear(dim, dim, bias=False)
+        self.c_q = BitLinear(dim, dim, bias=False)
+        self.c_k = BitLinear(dim, kv_dim, bias=False)
+        self.c_v = BitLinear(dim, kv_dim, bias=False)
+        self.proj = BitLinear(dim, dim, bias=False)
         self.proj._zero_init = True
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
         self.rotary = Rotary(self.head_dim, base=rope_base)
@@ -669,8 +675,8 @@ class MLP(nn.Module):
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         hidden = mlp_mult * dim
-        self.fc = CastedLinear(dim, hidden, bias=False)
-        self.proj = CastedLinear(hidden, dim, bias=False)
+        self.fc = BitLinear(dim, hidden, bias=False)
+        self.proj = BitLinear(hidden, dim, bias=False)
         self.proj._zero_init = True
 
     def forward(self, x: Tensor) -> Tensor:
@@ -1189,36 +1195,36 @@ def main() -> None:
     )
     log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
 
-    # INT4 mixed roundtrip
-    int4_obj, int4_stats = quantize_state_dict_int4_mixed(base_model.state_dict())
-    int4_buf = io.BytesIO()
-    torch.save(int4_obj, int4_buf)
-    int4_raw = int4_buf.getvalue()
-    int4_lzma = lzma.compress(int4_raw, preset=9)
-    int4_zlib = zlib.compress(int4_raw, 9)
-    int4_blob = int4_lzma if len(int4_lzma) <= len(int4_zlib) else int4_zlib
-    compress_method = "lzma" if len(int4_lzma) <= len(int4_zlib) else "zlib"
+    # Ternary roundtrip
+    tern_obj, tern_stats = quantize_state_dict_ternary(base_model.state_dict())
+    tern_buf = io.BytesIO()
+    torch.save(tern_obj, tern_buf)
+    tern_raw = tern_buf.getvalue()
+    tern_lzma = lzma.compress(tern_raw, preset=9)
+    tern_zlib = zlib.compress(tern_raw, 9)
+    tern_blob = tern_lzma if len(tern_lzma) <= len(tern_zlib) else tern_zlib
+    compress_method = "lzma" if len(tern_lzma) <= len(tern_zlib) else "zlib"
     if master_process:
-        with open("final_model.int4.ptz", "wb") as f:
-            f.write(int4_blob)
-        int4_file_bytes = os.path.getsize("final_model.int4.ptz")
+        with open("final_model.ternary.ptz", "wb") as f:
+            f.write(tern_blob)
+        tern_file_bytes = os.path.getsize("final_model.ternary.ptz")
         code_bytes = len(code.encode("utf-8"))
-        log0(f"INT4 mixed artifact: {int4_file_bytes} bytes ({compress_method}) = {int4_file_bytes/1e6:.2f}MB")
-        log0(f"  lzma: {len(int4_lzma)} bytes = {len(int4_lzma)/1e6:.2f}MB")
-        log0(f"  zlib: {len(int4_zlib)} bytes = {len(int4_zlib)/1e6:.2f}MB")
+        log0(f"Ternary artifact: {tern_file_bytes} bytes ({compress_method}) = {tern_file_bytes/1e6:.2f}MB")
+        log0(f"  lzma: {len(tern_lzma)} bytes = {len(tern_lzma)/1e6:.2f}MB")
+        log0(f"  zlib: {len(tern_zlib)} bytes = {len(tern_zlib)/1e6:.2f}MB")
         log0(f"  code: {code_bytes} bytes")
-        log0(f"Total submission size: {int4_file_bytes + code_bytes} bytes = {(int4_file_bytes + code_bytes)/1e6:.2f}MB")
+        log0(f"Total submission size: {tern_file_bytes + code_bytes} bytes = {(tern_file_bytes + code_bytes)/1e6:.2f}MB")
 
-    base_model.load_state_dict(dequantize_state_dict_int4_mixed(int4_obj), strict=True)
+    base_model.load_state_dict(dequantize_state_dict_ternary(tern_obj), strict=True)
     torch.cuda.synchronize()
-    t_q4eval = time.perf_counter()
-    q4_val_loss, q4_val_bpb = eval_val(
+    t_terneval = time.perf_counter()
+    tern_val_loss, tern_val_bpb = eval_val(
         args, model, rank, world_size, device, grad_accum_steps, val_tokens,
         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
     )
     torch.cuda.synchronize()
-    log0(f"final_int4_mixed_roundtrip val_loss:{q4_val_loss:.4f} val_bpb:{q4_val_bpb:.4f} eval_time:{1000.0 * (time.perf_counter() - t_q4eval):.0f}ms")
-    log0(f"final_int4_mixed_roundtrip_exact val_loss:{q4_val_loss:.8f} val_bpb:{q4_val_bpb:.8f}")
+    log0(f"final_ternary_roundtrip val_loss:{tern_val_loss:.4f} val_bpb:{tern_val_bpb:.4f} eval_time:{1000.0 * (time.perf_counter() - t_terneval):.0f}ms")
+    log0(f"final_ternary_roundtrip_exact val_loss:{tern_val_loss:.8f} val_bpb:{tern_val_bpb:.8f}")
 
     if distributed:
         dist.destroy_process_group()
