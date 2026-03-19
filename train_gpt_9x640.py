@@ -1194,14 +1194,20 @@ def main() -> None:
     int4_buf = io.BytesIO()
     torch.save(int4_obj, int4_buf)
     int4_raw = int4_buf.getvalue()
-    int4_blob = lzma.compress(int4_raw, preset=9)
+    int4_lzma = lzma.compress(int4_raw, preset=9)
+    int4_zlib = zlib.compress(int4_raw, 9)
+    int4_blob = int4_lzma if len(int4_lzma) <= len(int4_zlib) else int4_zlib
+    compress_method = "lzma" if len(int4_lzma) <= len(int4_zlib) else "zlib"
     if master_process:
         with open("final_model.int4.ptz", "wb") as f:
             f.write(int4_blob)
         int4_file_bytes = os.path.getsize("final_model.int4.ptz")
         code_bytes = len(code.encode("utf-8"))
-        log0(f"INT4 mixed artifact: {int4_file_bytes} bytes (int4:{int4_stats['int4_bytes']} int8:{int4_stats['int8_bytes']} fp16:{int4_stats['fp16_bytes']})")
-        log0(f"Total submission size int4+lzma: {int4_file_bytes + code_bytes} bytes")
+        log0(f"INT4 mixed artifact: {int4_file_bytes} bytes ({compress_method}) = {int4_file_bytes/1e6:.2f}MB")
+        log0(f"  lzma: {len(int4_lzma)} bytes = {len(int4_lzma)/1e6:.2f}MB")
+        log0(f"  zlib: {len(int4_zlib)} bytes = {len(int4_zlib)/1e6:.2f}MB")
+        log0(f"  code: {code_bytes} bytes")
+        log0(f"Total submission size: {int4_file_bytes + code_bytes} bytes = {(int4_file_bytes + code_bytes)/1e6:.2f}MB")
 
     base_model.load_state_dict(dequantize_state_dict_int4_mixed(int4_obj), strict=True)
     torch.cuda.synchronize()
