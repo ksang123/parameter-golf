@@ -613,6 +613,7 @@ class BitLinear(nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, group_size: int = 64):
         super().__init__(in_features, out_features, bias=bias)
         self.group_size = group_size
+        self._skip_quantize = False
 
     def _quantize_weights(self, w: Tensor) -> Tensor:
         # Per-group absmax ternary quantization with STE
@@ -631,7 +632,10 @@ class BitLinear(nn.Linear):
     def forward(self, x: Tensor) -> Tensor:
         # RMSNorm on input activations (BitNet b1.58 style)
         x = F.rms_norm(x, (x.size(-1),))
-        w = self._quantize_weights(self.weight)
+        if self._skip_quantize:
+            w = self.weight
+        else:
+            w = self._quantize_weights(self.weight)
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w.to(x.dtype), bias)
 
@@ -1227,6 +1231,10 @@ def main() -> None:
         log0(f"Total submission size: {tern_file_bytes + code_bytes} bytes = {(tern_file_bytes + code_bytes)/1e6:.2f}MB")
 
     base_model.load_state_dict(dequantize_state_dict_ternary(tern_obj), strict=True)
+    # Disable re-quantization for roundtrip eval — loaded weights are already dequantized ternary
+    for mod in base_model.modules():
+        if isinstance(mod, BitLinear):
+            mod._skip_quantize = True
     torch.cuda.synchronize()
     t_terneval = time.perf_counter()
     tern_val_loss, tern_val_bpb = eval_val(
