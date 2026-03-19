@@ -1,6 +1,7 @@
 #!/bin/bash
-# Run 3: 12x512, cosine schedule, higher peak LR, INT4 post-training
-RUN_ID=12x512_cosine \
+# 12x512 on 8xA100 — matches H100 token budget (~5.4B tokens, ~10345 steps)
+# Runs ~17min on A100 to simulate 10min on H100
+RUN_ID=12x512_a100 \
 DATA_PATH=./data/datasets/fineweb10B_sp1024/ \
 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
 VOCAB_SIZE=1024 \
@@ -14,12 +15,13 @@ QAT_ENABLED=0 \
 ITERATIONS=20000 \
 TRAIN_BATCH_TOKENS=524288 \
 TRAIN_SEQ_LEN=1024 \
-VAL_LOSS_EVERY=200 \
+VAL_LOSS_EVERY=2000 \
 VAL_BATCH_SIZE=524288 \
-MAX_WALLCLOCK_SECONDS=600 \
+MAX_WALLCLOCK_SECONDS=1020 \
 TRAIN_LOG_EVERY=50 \
 LR_WARMUP_STEPS=50 \
 LR_SCHEDULE=cosine \
+LR_MIN_FRAC=0.05 \
 MATRIX_LR=0.06 \
 SCALAR_LR=0.06 \
 TIED_EMBED_LR=0.05 \
