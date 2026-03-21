@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-# BitNet v2: 12x768 MLP3x + SmearGate + BigramHash + OrthoInit + WD + XSA + TTT + Curriculum
+# BitNet v2: 12x768 MLP3x + SmearGate + BigramHash + OrthoInit + WD + XSA + TTT
 RUN_ID=bitnet_v2_8xh100 \
 ITERATIONS=20000 \
 NUM_LAYERS=12 \
@@ -31,8 +31,6 @@ XSA_LAST_N=4 \
 TTT_ENABLED=1 \
 TTT_LR=3e-4 \
 TTT_EPOCHS=3 \
-SEQ_RAMP_START=256 \
-SEQ_RAMP_FRAC=0.25 \
-BATCH_RAMP_START=262144 \
-BATCH_RAMP_FRAC=0.20 \
+SEQ_RAMP_START=2048 \
+BATCH_RAMP_START=524288 \
 torchrun --standalone --nproc_per_node=8 train_bitnet.py
