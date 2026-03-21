@@ -461,7 +461,7 @@ def eval_val_sliding(
 def ttt_and_eval_sliding(
     args, base_model, rank, world_size, device, val_tokens,
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-    stride: int, batch_seqs: int = 32,
+    stride: int, batch_seqs: int = 32, freeze_ternary: bool = True,
 ) -> tuple[float, float]:
     """Causal TTT: for each chunk, evaluate first (record loss), then train on it."""
     seq_len = args.train_seq_len
@@ -471,8 +471,11 @@ def ttt_and_eval_sliding(
     chunk_starts = list(range(0, total_tokens, chunk_size))
 
     # SGD optimizer on continuous params only (freeze ternary BitLinear weights)
-    bitlinear_weights = {id(m.weight) for m in base_model.modules() if isinstance(m, BitLinear)}
-    ttt_params = [p for p in base_model.parameters() if id(p) not in bitlinear_weights]
+    if freeze_ternary:
+        bitlinear_weights = {id(m.weight) for m in base_model.modules() if isinstance(m, BitLinear)}
+        ttt_params = [p for p in base_model.parameters() if id(p) not in bitlinear_weights]
+    else:
+        ttt_params = list(base_model.parameters())
     ttt_opt = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=0.9)
 
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
@@ -1397,6 +1400,20 @@ def main() -> None:
         torch.cuda.synchronize()
         log0(f"final_ttt_sliding val_loss:{ttt_loss:.4f} val_bpb:{ttt_bpb:.4f} ttt_epochs:{args.ttt_epochs} ttt_lr:{args.ttt_lr} eval_time:{1000.0 * (time.perf_counter() - t_ttt):.0f}ms")
         log0(f"final_ttt_sliding_exact val_loss:{ttt_loss:.8f} val_bpb:{ttt_bpb:.8f}")
+        base_model.load_state_dict(pre_ttt_sd)
+
+        # TTT with all params (including ternary weights)
+        torch.cuda.synchronize()
+        t_ttt2 = time.perf_counter()
+        ttt2_loss, ttt2_bpb = ttt_and_eval_sliding(
+            args, base_model, rank, world_size, device, val_tokens,
+            base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            stride=args.eval_stride, batch_seqs=args.eval_batch_seqs,
+            freeze_ternary=False,
+        )
+        torch.cuda.synchronize()
+        log0(f"final_ttt_sliding_all_params val_loss:{ttt2_loss:.4f} val_bpb:{ttt2_bpb:.4f} eval_time:{1000.0 * (time.perf_counter() - t_ttt2):.0f}ms")
+        log0(f"final_ttt_sliding_all_params_exact val_loss:{ttt2_loss:.8f} val_bpb:{ttt2_bpb:.8f}")
         base_model.load_state_dict(pre_ttt_sd)
 
     if distributed:
