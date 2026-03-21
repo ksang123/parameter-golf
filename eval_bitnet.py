@@ -89,6 +89,14 @@ def main():
     cli = parser.parse_args()
 
     args = Hyperparameters()
+    args.num_layers = 12
+    args.model_dim = 768
+    args.num_heads = 12
+    args.num_kv_heads = 6
+    args.mlp_hidden = 2496
+    args.train_seq_len = 2048
+    args.rope_base = 200000
+    args.xsa_last_n = 0
     args.ttt_lr = cli.ttt_lr
     args.ttt_epochs = cli.ttt_epochs
     args.ttt_chunk_tokens = cli.ttt_chunk
