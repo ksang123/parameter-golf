@@ -496,7 +496,7 @@ def ttt_and_eval_sliding(
         my_windows = window_starts[my_s:my_e]
 
         base_model.eval()
-        with torch.inference_mode():
+        with torch.no_grad():
             for bi in range(0, len(my_windows), batch_seqs):
                 batch_ws = my_windows[bi:bi + batch_seqs]
                 bsz = len(batch_ws)
