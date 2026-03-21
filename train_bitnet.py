@@ -99,7 +99,7 @@ class Hyperparameters:
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", 1)))
     ttt_lr = float(os.environ.get("TTT_LR", 3e-4))
     ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
-    ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 2048))
+    ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 2_000_000))
     # Curriculum: seq length ramp and batch size warmup
     seq_ramp_start = int(os.environ.get("SEQ_RAMP_START", 256))
     seq_ramp_frac = float(os.environ.get("SEQ_RAMP_FRAC", 0.25))  # ramp to full by this fraction of steps
@@ -1338,6 +1338,11 @@ def main() -> None:
     if HAS_ZSTD:
         cctx = zstd.ZstdCompressor(level=22)
         candidates.append(("zstd", cctx.compress(tern_raw)))
+    try:
+        import brotli
+        candidates.append(("brotli", brotli.compress(tern_raw, quality=11)))
+    except ImportError:
+        pass
     compress_method, tern_blob = min(candidates, key=lambda x: len(x[1]))
     if master_process:
         with open("final_model.ternary.ptz", "wb") as f:
