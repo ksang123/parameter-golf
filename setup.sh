@@ -29,4 +29,5 @@ uv pip install torch numpy sentencepiece huggingface-hub datasets tqdm zstandard
 echo "=== Downloading FineWeb sp1024 ($TRAIN_SHARDS train shards) ==="
 python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards "$TRAIN_SHARDS"
 
+source .venv/bin/activate
 echo "=== Setup complete ==="
