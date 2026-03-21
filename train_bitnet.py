@@ -470,8 +470,10 @@ def ttt_and_eval_sliding(
     # Split val into chunks; each chunk is evaluated then trained on
     chunk_starts = list(range(0, total_tokens, chunk_size))
 
-    # SGD optimizer on all params
-    ttt_opt = torch.optim.SGD(base_model.parameters(), lr=args.ttt_lr, momentum=0.9)
+    # SGD optimizer on continuous params only (freeze ternary BitLinear weights)
+    bitlinear_weights = {id(m.weight) for m in base_model.modules() if isinstance(m, BitLinear)}
+    ttt_params = [p for p in base_model.parameters() if id(p) not in bitlinear_weights]
+    ttt_opt = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=0.9)
 
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     token_count = torch.zeros((), device=device, dtype=torch.float64)
@@ -523,6 +525,7 @@ def ttt_and_eval_sliding(
                     byte_count += tb.sum()
 
         # --- TRAIN on this chunk (causal: only after eval) ---
+        # Only update continuous params (norms, scales, gates) — freeze ternary weights
         base_model.train()
         chunk_len = ce - cs
         for _epoch in range(args.ttt_epochs):
@@ -535,11 +538,6 @@ def ttt_and_eval_sliding(
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     loss = base_model(x, y)
                 loss.backward()
-                # Sync gradients across ranks
-                if dist.is_available() and dist.is_initialized():
-                    for p in base_model.parameters():
-                        if p.grad is not None:
-                            dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
                 ttt_opt.step()
 
     if dist.is_available() and dist.is_initialized():
