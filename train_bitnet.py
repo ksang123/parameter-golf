@@ -99,6 +99,11 @@ class Hyperparameters:
     ttt_lr = float(os.environ.get("TTT_LR", 3e-4))
     ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
     ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 2048))
+    # Curriculum: seq length ramp and batch size warmup
+    seq_ramp_start = int(os.environ.get("SEQ_RAMP_START", 256))
+    seq_ramp_frac = float(os.environ.get("SEQ_RAMP_FRAC", 0.25))  # ramp to full by this fraction of steps
+    batch_ramp_start = int(os.environ.get("BATCH_RAMP_START", 262_144))
+    batch_ramp_frac = float(os.environ.get("BATCH_RAMP_FRAC", 0.20))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -1022,7 +1027,7 @@ class GPT(nn.Module):
         if self.lm_head is not None:
             self.lm_head._zero_init = True
         self.smear = SmearGate(model_dim)
-        self.bigram = BigramHashEmbedding(4096, 64, model_dim)
+        self.bigram = BigramHashEmbedding(10240, 64, model_dim)
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -1359,10 +1364,26 @@ def main() -> None:
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
+        # Curriculum: ramp seq_len and batch_tokens
+        if args.seq_ramp_frac > 0 and args.seq_ramp_start < args.train_seq_len:
+            t = min(step / max(args.seq_ramp_frac * args.iterations, 1), 1.0)
+            # Step through powers of 2 from start to full
+            log_lo, log_hi = math.log2(args.seq_ramp_start), math.log2(args.train_seq_len)
+            cur_seq_len = 1 << round(log_lo + t * (log_hi - log_lo))
+        else:
+            cur_seq_len = args.train_seq_len
+        if args.batch_ramp_frac > 0 and args.batch_ramp_start < args.train_batch_tokens:
+            t = min(step / max(args.batch_ramp_frac * args.iterations, 1), 1.0)
+            cur_batch = int(args.batch_ramp_start + t * (args.train_batch_tokens - args.batch_ramp_start))
+            # Round to multiple of (world_size * grad_accum_steps * cur_seq_len)
+            chunk = world_size * grad_accum_steps * cur_seq_len
+            cur_batch = max((cur_batch // chunk) * chunk, chunk)
+        else:
+            cur_batch = args.train_batch_tokens
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+            x, y = train_loader.next_batch(cur_batch, cur_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
