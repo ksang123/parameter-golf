@@ -25,6 +25,6 @@ MUON_WD=0.04 \
 ROPE_BASE=200000 \
 EVAL_STRIDE=64 \
 EVAL_BATCH_SEQS=32 \
-WARMDOWN_ITERS=3000 \
+WARMDOWN_ITERS=1200 \
 GRAD_CLIP_NORM=0.3 \
 torchrun --standalone --nproc_per_node=8 train_bitnet.py
