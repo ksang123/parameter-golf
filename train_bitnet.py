@@ -529,7 +529,6 @@ def ttt_and_eval_sliding(
                     byte_count += tb.sum()
 
         # --- TRAIN on this chunk (causal: only after eval) ---
-        # Only update continuous params (norms, scales, gates) — freeze ternary weights
         base_model.train()
         chunk_len = ce - cs
         for _epoch in range(args.ttt_epochs):
