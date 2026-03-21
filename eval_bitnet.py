@@ -245,13 +245,14 @@ def main():
     # Save clean state for resetting between variants
     clean_sd = {k: v.clone() for k, v in base_model.state_dict().items()}
 
-    # --- 1. Sliding window only ---
-    log0("\n=== Sliding Window Eval ===", rank)
-    torch.cuda.synchronize(); t0 = time.perf_counter()
-    sl, sb = eval_val_sliding(args, base_model, rank, world_size, device, val_tokens, *luts,
-                              stride=cli.stride, batch_seqs=cli.batch_seqs)
-    torch.cuda.synchronize()
-    log0(f"val_loss:{sl:.6f} val_bpb:{sb:.6f} time:{time.perf_counter()-t0:.1f}s", rank)
+    # --- 1. Sliding window only (skip if running TTT variants) ---
+    if not (cli.ttt or cli.ttt_all or cli.ttt_incremental):
+        log0("\n=== Sliding Window Eval ===", rank)
+        torch.cuda.synchronize(); t0 = time.perf_counter()
+        sl, sb = eval_val_sliding(args, base_model, rank, world_size, device, val_tokens, *luts,
+                                  stride=cli.stride, batch_seqs=cli.batch_seqs)
+        torch.cuda.synchronize()
+        log0(f"val_loss:{sl:.6f} val_bpb:{sb:.6f} time:{time.perf_counter()-t0:.1f}s", rank)
 
     # --- 2. TTT frozen ternary (chunk) ---
     if cli.ttt:
