@@ -828,6 +828,7 @@ class BigramHashEmbedding(nn.Module):
         self.proj = CastedLinear(bigram_dim, model_dim, bias=False) if bigram_dim != model_dim else None
         if self.proj is not None:
             nn.init.zeros_(self.proj.weight)
+            self.proj._zero_init = True
         self.scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
 
     def bigram_hash(self, tokens: Tensor) -> Tensor:
@@ -917,7 +918,7 @@ class GPT(nn.Module):
         if self.lm_head is not None:
             self.lm_head._zero_init = True
         self.smear = SmearGate(model_dim)
-        self.bigram = BigramHashEmbedding(4096, 128, model_dim)
+        self.bigram = BigramHashEmbedding(4096, 64, model_dim)
         self._init_weights()
 
     def _init_weights(self) -> None:
