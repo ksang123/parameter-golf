@@ -144,8 +144,8 @@ def ttt_eval_sliding(
             seen = val_tokens[:ce + 1]
             ttt_train_step(base_model, seen, seq_len, ttt_opt, device)
 
-        if rank == 0 and (ci + 1) % 5 == 0:
-            print(f"  chunk {ci+1}/{len(chunk_starts)}")
+        if rank == 0 and (ci + 1) % max(len(chunk_starts) // 4, 1) == 0:
+            print(f"  chunk {ci+1}/{len(chunk_starts)} ({100*(ci+1)//len(chunk_starts)}%)")
 
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
