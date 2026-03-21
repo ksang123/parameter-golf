@@ -121,12 +121,12 @@ def main():
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         slide_loss, slide_bpb = eval_val_sliding(
-        args, model, 0, 1, device, val_tokens,
-        base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-        stride=cli.stride, batch_seqs=cli.batch_seqs,
-    )
-    torch.cuda.synchronize()
-    print(f"val_loss:{slide_loss:.6f} val_bpb:{slide_bpb:.6f} time:{time.perf_counter()-t0:.1f}s")
+            args, model, 0, 1, device, val_tokens,
+            base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            stride=cli.stride, batch_seqs=cli.batch_seqs,
+        )
+        torch.cuda.synchronize()
+        print(f"val_loss:{slide_loss:.6f} val_bpb:{slide_bpb:.6f} time:{time.perf_counter()-t0:.1f}s")
 
     # TTT frozen ternary
     if cli.ttt:
