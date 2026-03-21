@@ -512,7 +512,7 @@ def ttt_and_eval_sliding(
                 ).reshape(bsz, seq_len)
                 for i, ws in enumerate(batch_ws):
                     wlen = wlens[i]
-                    s = 0 if ws == 0 and cs == 0 else max(wlen - stride, 0)
+                    s = 0 if ws == 0 else max(wlen - stride, 0)
                     scored_nll = nll[i, s:wlen].to(torch.float64)
                     loss_sum += scored_nll.sum()
                     token_count += float(wlen - s)
@@ -648,6 +648,9 @@ class BitLinear(nn.Linear):
         super().__init__(in_features, out_features, bias=bias)
         self.group_size = group_size
         self._skip_quantize = False
+        self._cached_q = None
+        self._cached_scale = None
+        self._cached_shape = None
 
     def _quantize_weights(self, w: Tensor) -> Tensor:
         # Per-group absmax ternary quantization with STE
@@ -1255,6 +1258,11 @@ def main() -> None:
             cur_batch = max((cur_batch // chunk) * chunk, chunk)
         else:
             cur_batch = args.train_batch_tokens
+        # Sync curriculum across DDP ranks to prevent desync
+        if distributed:
+            sync = torch.tensor([cur_seq_len, cur_batch], device=device, dtype=torch.int64)
+            dist.broadcast(sync, src=0)
+            cur_seq_len, cur_batch = int(sync[0].item()), int(sync[1].item())
         for micro_step in range(grad_accum_steps):
             if distributed:
                 model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
