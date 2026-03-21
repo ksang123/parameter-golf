@@ -470,13 +470,9 @@ def ttt_and_eval_sliding(
     # Split val into chunks; each chunk is evaluated then trained on
     chunk_starts = list(range(0, total_tokens, chunk_size))
 
-    # SGD optimizer: freeze ternary weights unless TTT_FULL_MODEL=1
-    ttt_full = bool(int(os.environ.get("TTT_FULL_MODEL", 0)))
-    if ttt_full:
-        ttt_params = list(base_model.parameters())
-    else:
-        bitlinear_weights = {id(m.weight) for m in base_model.modules() if isinstance(m, BitLinear)}
-        ttt_params = [p for p in base_model.parameters() if id(p) not in bitlinear_weights]
+    # SGD optimizer on continuous params only (freeze ternary BitLinear weights)
+    bitlinear_weights = {id(m.weight) for m in base_model.modules() if isinstance(m, BitLinear)}
+    ttt_params = [p for p in base_model.parameters() if id(p) not in bitlinear_weights]
     ttt_opt = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=0.9)
 
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
