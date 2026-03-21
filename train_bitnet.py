@@ -94,6 +94,11 @@ class Hyperparameters:
     eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
     eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", 32))
     muon_wd = float(os.environ.get("MUON_WD", 0.04))
+    xsa_last_n = int(os.environ.get("XSA_LAST_N", 3))
+    ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", 1)))
+    ttt_lr = float(os.environ.get("TTT_LR", 3e-4))
+    ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
+    ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 2048))
 
 # -----------------------------
 # MUON OPTIMIZER 
@@ -579,6 +584,95 @@ def eval_val_sliding(
     base_model.train()
     return val_loss, bits_per_token * tokens_per_byte
 
+
+def ttt_and_eval_sliding(
+    args, base_model, rank, world_size, device, val_tokens,
+    base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+    stride: int, batch_seqs: int = 32,
+) -> tuple[float, float]:
+    """Causal TTT: for each chunk, evaluate first (record loss), then train on it."""
+    seq_len = args.train_seq_len
+    total_tokens = val_tokens.numel() - 1
+    chunk_size = args.ttt_chunk_tokens
+    # Split val into chunks; each chunk is evaluated then trained on
+    chunk_starts = list(range(0, total_tokens, chunk_size))
+
+    # SGD optimizer on all params
+    ttt_opt = torch.optim.SGD(base_model.parameters(), lr=args.ttt_lr, momentum=0.9)
+
+    loss_sum = torch.zeros((), device=device, dtype=torch.float64)
+    token_count = torch.zeros((), device=device, dtype=torch.float64)
+    byte_count = torch.zeros((), device=device, dtype=torch.float64)
+
+    for ci, cs in enumerate(chunk_starts):
+        ce = min(cs + chunk_size, total_tokens)
+        chunk_tokens = val_tokens[cs:ce + 1]  # +1 for targets
+
+        # --- EVAL this chunk (sliding window) ---
+        window_starts = [ws for ws in range(0, ce - cs, stride)
+                         if min(ws + seq_len, ce - cs) - ws >= 1]
+        total_windows = len(window_starts)
+        my_s = (total_windows * rank) // world_size
+        my_e = (total_windows * (rank + 1)) // world_size
+        my_windows = window_starts[my_s:my_e]
+
+        base_model.eval()
+        with torch.inference_mode():
+            for bi in range(0, len(my_windows), batch_seqs):
+                batch_ws = my_windows[bi:bi + batch_seqs]
+                bsz = len(batch_ws)
+                x_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                y_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                wlens = []
+                for i, ws in enumerate(batch_ws):
+                    end = min(ws + seq_len, ce - cs)
+                    wlen = end - ws
+                    wlens.append(wlen)
+                    chunk = chunk_tokens[ws:ws + wlen + 1].to(dtype=torch.int64, device=device)
+                    x_batch[i, :wlen] = chunk[:-1]
+                    y_batch[i, :wlen] = chunk[1:]
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits = base_model.forward_logits(x_batch)
+                nll = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)).float(),
+                    y_batch.reshape(-1), reduction="none",
+                ).reshape(bsz, seq_len)
+                for i, ws in enumerate(batch_ws):
+                    wlen = wlens[i]
+                    s = 0 if ws == 0 and cs == 0 else max(wlen - stride, 0)
+                    scored_nll = nll[i, s:wlen].to(torch.float64)
+                    loss_sum += scored_nll.sum()
+                    token_count += float(wlen - s)
+                    tgt = y_batch[i, s:wlen]
+                    prev = x_batch[i, s:wlen]
+                    tb = base_bytes_lut[tgt].to(torch.float64)
+                    tb += (has_leading_space_lut[tgt] & ~is_boundary_token_lut[prev]).to(torch.float64)
+                    byte_count += tb.sum()
+
+        # --- TRAIN on this chunk (causal: only after eval) ---
+        base_model.train()
+        chunk_len = ce - cs
+        for _epoch in range(args.ttt_epochs):
+            for ti in range(0, chunk_len - 1, seq_len):
+                end = min(ti + seq_len, chunk_len)
+                tlen = end - ti
+                x = chunk_tokens[ti:ti + tlen].unsqueeze(0).to(dtype=torch.int64, device=device)
+                y = chunk_tokens[ti + 1:ti + tlen + 1].unsqueeze(0).to(dtype=torch.int64, device=device)
+                ttt_opt.zero_grad()
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    loss = base_model(x, y)
+                loss.backward()
+                ttt_opt.step()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(byte_count, op=dist.ReduceOp.SUM)
+    val_loss = (loss_sum / token_count).item()
+    bits_per_token = val_loss / math.log(2.0)
+    tokens_per_byte = token_count.item() / byte_count.item()
+    return val_loss, bits_per_token * tokens_per_byte
+
 # -----------------------------
 # DATA LOADING 
 # -----------------------------
@@ -758,6 +852,7 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = dim // num_heads
+        self.group_size = num_heads // num_kv_heads
         if self.head_dim % 2 != 0:
             raise ValueError("head_dim must be even for RoPE")
         kv_dim = self.num_kv_heads * self.head_dim
@@ -768,6 +863,7 @@ class CausalSelfAttention(nn.Module):
         self.proj._zero_init = True
         self.q_gain = nn.Parameter(torch.full((num_heads,), qk_gain_init, dtype=torch.float32))
         self.rotary = Rotary(self.head_dim, base=rope_base)
+        self.xsa_enabled = False  # set True on last N layers
 
     def forward(self, x: Tensor) -> Tensor:
         bsz, seqlen, dim = x.shape
@@ -781,13 +877,17 @@ class CausalSelfAttention(nn.Module):
         k = apply_rotary_emb(k, cos, sin)
         q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
         y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            is_causal=True,
+            q, k, v, attn_mask=None, is_causal=True,
             enable_gqa=(self.num_kv_heads != self.num_heads),
         )
+        # XSA: subtract self-value projection (GQA-aware, zero alloc)
+        if self.xsa_enabled:
+            # y: [B, H, T, D], v: [B, Hkv, T, D]
+            vn = F.normalize(v, dim=-1)  # [B, Hkv, T, D]
+            y_g = y.reshape(bsz, self.num_kv_heads, self.group_size, seqlen, self.head_dim)
+            vn_g = vn.unsqueeze(2)  # [B, Hkv, 1, T, D]
+            dot = (y_g * vn_g).sum(-1, keepdim=True)  # [B, Hkv, G, T, 1]
+            y = (y_g - dot * vn_g).reshape(bsz, self.num_heads, seqlen, self.head_dim)
         y = y.transpose(1, 2).contiguous().reshape(bsz, seqlen, dim)
         return self.proj(y)
 
@@ -888,6 +988,7 @@ class GPT(nn.Module):
         logit_softcap: float,
         rope_base: float,
         qk_gain_init: float,
+        xsa_last_n: int = 0,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -913,6 +1014,9 @@ class GPT(nn.Module):
                 for i in range(num_layers)
             ]
         )
+        # Enable XSA on last N layers
+        for i in range(max(0, num_layers - xsa_last_n), num_layers):
+            self.blocks[i].attn.xsa_enabled = True
         self.final_norm = RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
@@ -1076,6 +1180,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
         qk_gain_init=args.qk_gain_init,
+        xsa_last_n=args.xsa_last_n,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
@@ -1364,7 +1469,7 @@ def main() -> None:
     log0(f"final_ternary_roundtrip val_loss:{tern_val_loss:.4f} val_bpb:{tern_val_bpb:.4f} eval_time:{1000.0 * (time.perf_counter() - t_terneval):.0f}ms")
     log0(f"final_ternary_roundtrip_exact val_loss:{tern_val_loss:.8f} val_bpb:{tern_val_bpb:.8f}")
 
-    # Sliding window eval
+    # Sliding window eval (no TTT)
     if args.eval_stride > 0 and args.eval_stride < args.train_seq_len:
         torch.cuda.synchronize()
         t_slide = time.perf_counter()
@@ -1376,6 +1481,21 @@ def main() -> None:
         torch.cuda.synchronize()
         log0(f"final_sliding_window val_loss:{slide_loss:.4f} val_bpb:{slide_bpb:.4f} stride:{args.eval_stride} eval_time:{1000.0 * (time.perf_counter() - t_slide):.0f}ms")
         log0(f"final_sliding_window_exact val_loss:{slide_loss:.8f} val_bpb:{slide_bpb:.8f}")
+
+    # TTT: causal SGD on val data (evaluate chunk, then train on it)
+    if args.ttt_enabled and args.eval_stride > 0:
+        pre_ttt_sd = {k: v.clone() for k, v in base_model.state_dict().items()}
+        torch.cuda.synchronize()
+        t_ttt = time.perf_counter()
+        ttt_loss, ttt_bpb = ttt_and_eval_sliding(
+            args, base_model, rank, world_size, device, val_tokens,
+            base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            stride=args.eval_stride, batch_seqs=args.eval_batch_seqs,
+        )
+        torch.cuda.synchronize()
+        log0(f"final_ttt_sliding val_loss:{ttt_loss:.4f} val_bpb:{ttt_bpb:.4f} ttt_epochs:{args.ttt_epochs} ttt_lr:{args.ttt_lr} eval_time:{1000.0 * (time.perf_counter() - t_ttt):.0f}ms")
+        log0(f"final_ttt_sliding_exact val_loss:{ttt_loss:.8f} val_bpb:{ttt_bpb:.8f}")
+        base_model.load_state_dict(pre_ttt_sd)
 
     if distributed:
         dist.destroy_process_group()
