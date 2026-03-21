@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
-# BitNet v2 — conservative: v1 hyperparams + new arch features
-RUN_ID=bitnet_v2_conservative \
+# BitNet v2 — conservative + XSA4 + warmdown1800
+RUN_ID=bitnet_v2_xsa \
 ITERATIONS=20000 \
 NUM_LAYERS=12 \
 MODEL_DIM=768 \
@@ -25,9 +25,9 @@ MUON_WD=0.0 \
 ROPE_BASE=200000 \
 EVAL_STRIDE=64 \
 EVAL_BATCH_SEQS=32 \
-WARMDOWN_ITERS=1200 \
+WARMDOWN_ITERS=1800 \
 GRAD_CLIP_NORM=0.0 \
-XSA_LAST_N=0 \
+XSA_LAST_N=4 \
 TTT_ENABLED=1 \
 TTT_LR=3e-4 \
 TTT_EPOCHS=3 \
