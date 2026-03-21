@@ -903,8 +903,6 @@ class GPT(nn.Module):
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
             self.lm_head._zero_init = True
-        self.smear = SmearGate(model_dim)
-        self.bigram = BigramHashEmbedding(10240, 64, model_dim)
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -918,9 +916,7 @@ class GPT(nn.Module):
 
     def _body(self, input_ids: Tensor) -> Tensor:
         x = self.tok_emb(input_ids)
-        x = x + self.bigram(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
-        x = self.smear(x)
         x0 = x
         skips: list[Tensor] = []
         for i in range(self.num_encoder_layers):
