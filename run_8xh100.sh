@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
-# BitNet v2 — 12H/6KV (hd=64 for flash), LR=0.065, warmdown 2200
-RUN_ID=bitnet_v2_fast \
+# BitNet v2 — LR=0.065, warmdown=2800 (53% of steps)
+RUN_ID=bitnet_v2_wd2800 \
 ITERATIONS=20000 \
 NUM_LAYERS=12 \
 MODEL_DIM=768 \
