@@ -115,11 +115,12 @@ def main():
     model = load_model(cli.model, args, device)
     print(f"Model loaded from {cli.model}")
 
-    # Sliding window eval
-    print("\n=== Sliding Window Eval ===")
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    slide_loss, slide_bpb = eval_val_sliding(
+    # Sliding window eval (skip if running TTT — TTT includes it)
+    if not cli.ttt and not cli.ttt_all:
+        print("\n=== Sliding Window Eval ===")
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        slide_loss, slide_bpb = eval_val_sliding(
         args, model, 0, 1, device, val_tokens,
         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
         stride=cli.stride, batch_seqs=cli.batch_seqs,
