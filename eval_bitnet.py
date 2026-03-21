@@ -157,12 +157,18 @@ def ttt_eval_sliding(
     return val_loss, bpt * tpb
 
 
-def make_ttt_optimizer(base_model, lr, freeze_ternary):
+def make_ttt_optimizer(base_model, lr, freeze_ternary, freeze_first_n=2):
     if freeze_ternary:
         bl_weights = {id(m.weight) for m in base_model.modules() if isinstance(m, BitLinear)}
         params = [p for p in base_model.parameters() if id(p) not in bl_weights]
     else:
         params = list(base_model.parameters())
+    # Freeze first N blocks (stable low-level features don't need adaptation)
+    frozen = set()
+    for i in range(min(freeze_first_n, len(base_model.blocks))):
+        for p in base_model.blocks[i].parameters():
+            frozen.add(id(p))
+    params = [p for p in params if id(p) not in frozen]
     return torch.optim.SGD(params, lr=lr, momentum=0.9)
 
 
@@ -177,7 +183,7 @@ def main():
     parser.add_argument("--ttt-all", action="store_true", help="TTT all params (chunk)")
     parser.add_argument("--ttt-incremental", action="store_true", help="TTT all params (incremental)")
     parser.add_argument("--ttt-chunk", type=int, default=2_000_000)
-    parser.add_argument("--ttt-lr", type=float, default=3e-4)
+    parser.add_argument("--ttt-lr", type=float, default=2e-3)
     parser.add_argument("--ttt-epochs", type=int, default=3)
     parser.add_argument("--stride", type=int, default=64)
     parser.add_argument("--batch-seqs", type=int, default=32)
